@@ -1,38 +1,49 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from sklearn.metrics.pairwise import cosine_similarity
 from joblib import load
 import ast
+import time
+import psutil
+import os
+import tracemalloc
+
+# Start memory tracking
+tracemalloc.start()
+
+# Get current process info
+process = psutil.Process(os.getpid())
 
 # Set page config must be first command
 st.set_page_config(layout="wide", page_title="Data Catalog Search")
 
-# Load data and models with proper embedding conversion
+# Load data and models
 @st.cache_resource
 def load_data_and_models():
-    df = pd.read_csv('your_data.csv')  # Update with your actual data source
-    
-    # Convert string representations of lists to actual numpy arrays
+    df = pd.read_csv('final_dataset.csv')  # Replace with your actual dataset path
+
     def convert_embedding(embed_str):
         try:
             if isinstance(embed_str, str):
                 return np.array(ast.literal_eval(embed_str), dtype=np.float32)
             return embed_str
         except:
-            return np.zeros(384, dtype=np.float32)  # Default embedding if conversion fails
-    
+            return np.zeros(384, dtype=np.float32)
+
     df['search_emb'] = df['search_emb'].apply(convert_embedding)
     df['title_emb'] = df['title_emb'].apply(convert_embedding)
-    
+
     classifier = load('LinearSVC_classifier.joblib')
     embedder = SentenceTransformer("all-MiniLM-L6-v2")
-    return df, classifier, embedder
+    cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 
-df, classifier, embedder = load_data_and_models()
+    return df, classifier, embedder, cross_encoder
 
-# Unique products
+df, classifier, embedder, cross_encoder = load_data_and_models()
+
+# Unique product list
 products = np.array(['ASI', 'ASUSE', 'CAMS', 'CPI', 'HCES', 'IIP', 'MIS', 'NAS', 'PLFS', 'WMI'])
 
 # Classification function
@@ -47,21 +58,22 @@ def classify_query(query, embedder, classifier):
     top3_probs = probabilities[top3_indices]
     return list(zip(top3_products, top3_probs))
 
-# Semantic search function with proper embedding handling
-def semantic_search(query_embedding, product_df, n_results):
-    doc_embeddings = np.stack(product_df['search_emb'].values)
-    similarities = cosine_similarity(query_embedding, doc_embeddings)[0]
-    top_indices = np.argsort(similarities)[-n_results:][::-1]
-    return product_df.iloc[top_indices]
+# Deep semantic search using cosine + CrossEncoder
+def deep_semantic_search(query, df_slice, top_k):
+    # First: reduce to top 50 by cosine
+    query_embedding = embedder.encode([query])
+    doc_embeddings = np.stack(df_slice['search_emb'].values)
+    cosine_scores = cosine_similarity(query_embedding, doc_embeddings)[0]
+    top50_indices = np.argsort(cosine_scores)[-50:][::-1]
+    top50_df = df_slice.iloc[top50_indices]
 
-# Overall search function
-def overall_search(query_embedding, df, n_results=10):
-    doc_embeddings = np.stack(df['search_emb'].values)
-    similarities = cosine_similarity(query_embedding, doc_embeddings)[0]
-    top_indices = np.argsort(similarities)[-n_results:][::-1]
-    return df.iloc[top_indices]
+    # Then: re-rank using CrossEncoder
+    query_doc_pairs = [(query, text) for text in top50_df['search_text'].tolist()]
+    cross_scores = cross_encoder.predict(query_doc_pairs)
+    top_indices = np.argsort(cross_scores)[-top_k:][::-1]
+    return top50_df.iloc[top_indices]
 
-# Display result card (used for both product-specific and overall results)
+# Display result card
 def display_result_card(result, key_suffix=""):
     with st.expander(f"**{result['Title']}**", expanded=False):
         st.markdown(f"**Product:** {result['Product']}")
@@ -79,61 +91,66 @@ def display_result_card(result, key_suffix=""):
 if 'last_query' not in st.session_state:
     st.session_state['last_query'] = ""
 
-# Main app interface
+# Main app UI
 st.title("Data Catalog Search")
 query = st.text_input("Enter your search query:", key="search_query", 
                      value=st.session_state.get('last_query', ''))
 
-if query and (query != st.session_state.get('last_query', '') or 
-             'classified_results' not in st.session_state):
+if query and (query != st.session_state.get('last_query', '') or 'classified_results' not in st.session_state):
     with st.spinner("Searching..."):
-        # Classify and get product-specific results
         query_embedding = embedder.encode([query])
         top_products = classify_query(query, embedder, classifier)
-        
+
         classified_results = {}
-        n_results = [3, 2, 1]  # Results for 1st, 2nd, 3rd product
-        
+        n_results = [3, 2, 1]  # For top 3 products
+
         for i, (product, prob) in enumerate(top_products):
             product_df = df[df['Product'] == product]
-            num_rows = len(product_df)
-            
-            if num_rows <= 50:
-                results = semantic_search(query_embedding, product_df, n_results[i])
-            else:
-                doc_embeddings = np.stack(product_df['search_emb'].values)
-                similarities = cosine_similarity(query_embedding, doc_embeddings)[0]
-                top50_indices = np.argsort(similarities)[-50:][::-1]
-                top50_df = product_df.iloc[top50_indices]
-                results = semantic_search(query_embedding, top50_df, n_results[i])
-            
+            top_results = deep_semantic_search(query, product_df, n_results[i])
             classified_results[product] = {
                 'probability': prob,
-                'results': results
+                'results': top_results
             }
-        
-        # Get overall results
-        overall_results = overall_search(query_embedding, df, 10)
-        
-        # Store in session state
+
+        # Apply deep semantic search across all products for overall results
+        overall_results = deep_semantic_search(query, df, 10)
+
+        # Save to session state
         st.session_state['classified_results'] = classified_results
         st.session_state['overall_results'] = overall_results
         st.session_state['last_query'] = query
 
+# Display results
 if 'classified_results' in st.session_state and query:
+    t = time.time()
     classified_results = st.session_state['classified_results']
     overall_results = st.session_state['overall_results']
-    
+
     col1, col2 = st.columns([7, 3])
-    
+
     with col1:
         st.header("Product-Specific Results")
         for product, data in classified_results.items():
             st.subheader(f"{product} ({(data['probability']*100):.1f}% match)")
             for i, (_, result) in enumerate(data['results'].iterrows(), 1):
                 display_result_card(result, f"{product}_{i}")
-    
+
     with col2:
         st.header("Overall Top Matches")
         for i, (_, result) in enumerate(overall_results.iterrows(), 1):
             display_result_card(result, f"overall_{i}")
+    print("\n\n\nTotal Time: ",(time.time()-t)*1000, ' ms\n')
+
+
+
+# Print physical memory usage
+def print_memory_usage(label=""):
+    rss = process.memory_info().rss / (1024 ** 2)  # in MB
+    print(f"[{label}] Memory RSS (physical): {rss:.2f} MB")
+
+    # Peak from tracemalloc
+    current, peak = tracemalloc.get_traced_memory()
+    print(f"[{label}] Tracemalloc Current: {current / (1024**2):.2f} MB; Peak: {peak / (1024**2):.2f} MB")
+
+# Example usage — call this at important checkpoints
+print_memory_usage("After loading models and data")
