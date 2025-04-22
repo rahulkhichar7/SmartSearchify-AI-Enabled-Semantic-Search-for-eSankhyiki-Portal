@@ -10,19 +10,17 @@ import psutil
 import os
 import tracemalloc
 
-# Start memory tracking
+# Tracking Start
 tracemalloc.start()
 
-# Get current process info
 process = psutil.Process(os.getpid())
 
-# Set page config must be first command
 st.set_page_config(layout="wide", page_title="Data Catalog Search")
 
 # Load data and models
 @st.cache_resource
 def load_data_and_models():
-    df = pd.read_csv('final_dataset.csv')  # Replace with your actual dataset path
+    df = pd.read_csv('final_dataset.csv')  
 
     def convert_embedding(embed_str):
         try:
@@ -73,7 +71,6 @@ def deep_semantic_search(query, df_slice, top_k):
     top_indices = np.argsort(cross_scores)[-top_k:][::-1]
     return top50_df.iloc[top_indices]
 
-# Display result card
 def display_result_card(result, key_suffix=""):
     with st.expander(f"**{result['Title']}**", expanded=False):
         st.markdown(f"**Product:** {result['Product']}")
@@ -87,11 +84,9 @@ def display_result_card(result, key_suffix=""):
         st.markdown(f"[Download Data]({result['Download URL']})", unsafe_allow_html=True)
         st.markdown(f"**Description:** {result['Description']}")
 
-# Initialize session state
 if 'last_query' not in st.session_state:
     st.session_state['last_query'] = ""
 
-# Main app UI
 st.title("Data Catalog Search")
 query = st.text_input("Enter your search query:", key="search_query", 
                      value=st.session_state.get('last_query', ''))
@@ -112,10 +107,8 @@ if query and (query != st.session_state.get('last_query', '') or 'classified_res
                 'results': top_results
             }
 
-        # Apply deep semantic search across all products for overall results
+        # Apply deep semantic search across all products
         overall_results = deep_semantic_search(query, df, 10)
-
-        # Save to session state
         st.session_state['classified_results'] = classified_results
         st.session_state['overall_results'] = overall_results
         st.session_state['last_query'] = query
@@ -152,5 +145,4 @@ def print_memory_usage(label=""):
     current, peak = tracemalloc.get_traced_memory()
     print(f"[{label}] Tracemalloc Current: {current / (1024**2):.2f} MB; Peak: {peak / (1024**2):.2f} MB")
 
-# Example usage — call this at important checkpoints
 print_memory_usage("After loading models and data")
