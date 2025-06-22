@@ -101,7 +101,7 @@ cd SmartSearchify-AI-Enabled-Semantic-Search-for-eSankhyiki-Portal
 
 ### 2. Install Dependencies
 
-Recommended: Use a virtual environment.
+Recommended: Use a virtual environment (python version = 3.10.0)
 
 ```bash
 python -m venv venv
